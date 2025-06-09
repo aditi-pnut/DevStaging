@@ -17,13 +17,13 @@ cd /home/ubuntu/pnut-code/
 echo "Stopping existing containers..."
 docker compose down
 
-# Pull new images
+# Pull new images (ignore failures to allow partial updates)
 echo "Pulling new images..."
 docker compose pull --ignore-pull-failures
 
-# Start containers
-echo "Starting containers..."
-docker compose up -d
+# Start containers using the latest images
+echo "Starting containers with latest images..."
+docker compose up -d --pull always
 
 # Clean up unused images
 echo "Cleaning up unused images..."
