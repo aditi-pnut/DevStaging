@@ -5,7 +5,7 @@ set -e
 
 echo "Starting deployment process..."
 
-# Login to ECR
+# Login to ECR - remove this, and give permissions in the EC2 instance security group.
 echo "Logging into ECR..."
 aws ecr get-login-password --region us-east-2 | docker login --username AWS --password-stdin 878239241975.dkr.ecr.us-east-2.amazonaws.com
 
@@ -17,16 +17,17 @@ cd /home/ubuntu/pnut-code/
 echo "Stopping existing containers..."
 docker compose down
 
-# Pull new images (ignore failures to allow partial updates)
+
 echo "Pulling new images..."
-docker compose pull --ignore-pull-failures
+docker compose pull
 
 # Start containers using the latest images
 echo "Starting containers with latest images..."
-docker compose up -d --pull always
+docker compose up -d
 
 # Clean up unused images
-echo "Cleaning up unused images..."
-docker system prune -f
+echo "Cleaning up unused images & containers..."
+docker images prune
+docker container prune
 
 echo "Deployment completed!"
