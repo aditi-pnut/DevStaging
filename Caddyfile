@@ -2,7 +2,7 @@
     local_certs
 }
 
-staging.pnut.mocsh.in {
+ec2-3-148-115-73.us-east-2.compute.amazonaws.com {
     tls internal
 
     # Global CORS headers

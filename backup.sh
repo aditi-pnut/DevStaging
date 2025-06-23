@@ -65,8 +65,8 @@ DB_BACKUP_PATH="$BACKUP_PREFIX_PATH/$DB_BACKUP_DIR_NAME"
 COMPRESSED_STORAGE_FILE="$BACKUP_PATH/storage.tar.gz"
 COMPRESSED_DB_FILE="$BACKUP_PATH/database.tar.gz"
 
-S3_STORAGE_KEY="storage.tar.gz"
-S3_DB_KEY="database.tar.gz"
+S3_STORAGE_KEY="Staging/storage.tar.gz"
+S3_DB_KEY="Staging/database.tar.gz"
 
 # Create backup directory
 mkdir -vp "$BACKUP_PATH"
@@ -106,6 +106,37 @@ backup_table() {
         || handle_error "Failed to backup table $table"
 }
 
+backup_table_last_7_days() {
+    local table=$1
+    local date_column=$2
+
+    local filter_value
+    filter_value="$(date -d '7 days ago' +'%Y-%m-%d') 00:00:00"
+    local where_clause="$date_column > '$filter_value'"
+
+    MYSQL_PWD="$DB_PASSWORD" \
+    $MYSQLDUMP_CMD -u "$DB_USER" -h "$DB_HOST" -P "$DB_PORT" "$DB_DATABASE" "$table" \
+        --single-transaction \
+        --skip-lock-tables \
+        --no-tablespaces \
+        --set-gtid-purged=OFF \
+        --skip-comments \
+        --skip-dump-date \
+        --skip-set-charset \
+        --max-allowed-packet=1M \
+        --net-buffer-length=8K \
+        --skip-add-drop-table \
+        --where="$where_clause" \
+        --result-file="$DB_BACKUP_PATH/$table.sql" \
+
+    local exit_code=$?
+    if [ $exit_code -ne 0 ]; then
+        handle_error "Selective backup failed for $table (exit code $exit_code)"
+    else
+        log_message "Selective backup of $table completed successfully"
+    fi
+}
+
 # Function to backup database
 backup_database() {
     log_message "Starting database backup..."
@@ -117,9 +148,16 @@ backup_database() {
     # get all the tables in the database and backup each table
     # single table files help with selective restores
     for table in "${tables[@]}"; do
+        if [[ "$table" == "tol_LocalStorageDetails" ]]; then
+            log_message "Skipping $table for selective backup"
+            continue
+        fi
         backup_table "$table"
         log_message "Backup of table $table completed"
     done
+
+    log_message "Backing up tol_LocalStorageDetails (last 7 days)"
+    backup_table_last_7_days "tol_LocalStorageDetails" "CreatedDate"
 
     log_message "Compressing db backup to $COMPRESSED_DB_FILE"
     tar -czvf "$COMPRESSED_DB_FILE" --label="Database backup for $DATE taken from $DB_DATABASE" -C "$BACKUP_PREFIX_PATH" "$DB_BACKUP_DIR_NAME" || handle_error "Failed to compress backup"

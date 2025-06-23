@@ -5,7 +5,7 @@ set -e
 
 echo "Starting deployment process..."
 
-# Login to ECR - remove this, and give permissions in the EC2 instance security group.
+#ECR Login
 echo "Logging into ECR..."
 aws ecr get-login-password --region us-east-2 | docker login --username AWS --password-stdin 878239241975.dkr.ecr.us-east-2.amazonaws.com
 
@@ -27,7 +27,7 @@ docker compose up -d
 
 # Clean up unused images
 echo "Cleaning up unused images & containers..."
-docker images prune
-docker container prune
+docker image prune -f
+docker container prune -f
 
 echo "Deployment completed!"

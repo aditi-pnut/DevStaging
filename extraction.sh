@@ -1,65 +1,80 @@
 #!/bin/bash
 set -e
 
-# Load credentials from .env
-source ./cred.env
+# === Credentials ===
+S3_BUCKET="backup-from-production"
+S3_KEY="database.tar.gz"
 
-# Create output directory
-DUMP_DIR="./Dumps"
-mkdir -p "$DUMP_DIR"
+STAGE_HOST="devteststage.cojoh3xvwxbb.us-east-2.rds.amazonaws.com"
+DB_PORT=3306
+STAGE_USER="staginguser"
+STAGE_PASS="stagingpnut"
+STAGE_DB="omnilifestage"
 
-# Timestamped filename
-TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-DUMP_FILE="$DUMP_DIR/prod_backup_${TIMESTAMP}.sql.gz"
+# === DIRECTORIES ===
+WORK_DIR="./Dumps"
+ARCHIVE_PATH="$WORK_DIR/database.tar.gz"
+EXTRACT_DIR="$WORK_DIR/extracted_sqls"
+mkdir -p "$EXTRACT_DIR"
 
-echo "[1/4] Dumping FULL production database..."
-mysqldump -h "$PROD_HOST" -P "$DB_PORT" -u "$PROD_USER" -p"$PROD_PASS" \
-  "$PROD_DB" \
-  --routines --triggers --events \
-  --set-gtid-purged=OFF \
-  --single-transaction --quick --add-drop-table --skip-lock-tables \
-  2> /dev/null | gzip > "$DUMP_FILE"
+echo "[1/4] Downloading database.tar.gz from S3..."
+aws s3 cp "s3://$S3_BUCKET/$S3_KEY" "$ARCHIVE_PATH"
+echo "✅ Download complete."
 
-if [[ $? -ne 0 ]]; then
-  echo "❌ MYSQLDUMP failed. Aborting!!!"
+echo "[2/4] Extracting SQL files from archive..."
+tar -xzf "$ARCHIVE_PATH" -C "$EXTRACT_DIR"
+echo "✅ Extraction complete."
+echo "------------------------------------------------------------"
+
+echo "[3/4] Dropping all tables from staging database..."
+echo "Droppin database from staging database and creating new: $STAGE_DB"
+
+mysql_base=(mysql -h "$STAGE_HOST" -P "$DB_PORT" -u "$STAGE_USER" -p"$STAGE_PASS")
+echo "Dropping and recreating database: $STAGE_DB"
+
+"${mysql_base[@]}" -e "DROP DATABASE IF EXISTS \`$STAGE_DB\`;" || {
+  echo "Failed to drop database: $STAGE_DB"
+  exit 1
+}
+
+"${mysql_base[@]}" -e "CREATE DATABASE \`$STAGE_DB\` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;" || {
+  echo "Failed to create database: $STAGE_DB"
+  exit 1
+}
+
+"${mysql_base[@]}" -e "GRANT ALL PRIVILEGES ON \`$STAGE_DB\`.* TO '$STAGE_USER'@'%';" || {
+  echo "⚠️ Warning: Could not re-grant permissions to $STAGE_USER"
+}
+
+echo "Recreated the database: STAGE_DB"
+echo "------------------------------------------------------------"
+
+echo "[4/4] Importing SQL files into staging database..."
+
+latest_dir=$(find "$EXTRACT_DIR" -mindepth 1 -maxdepth 1 -type d | head -n 1)
+
+if [ -z "$latest_dir" ]; then
+  echo "No extracted timestamp folder found in $EXTRACT_DIR. Aborting!"
   exit 1
 fi
 
-echo "✅ Production dump saved at $DUMP_FILE"
-echo "⏳ Sleeping for 20 seconds..."
-sleep 20
-echo "------------------------------------------------------------"
+sql_dir="$latest_dir/database"
 
-echo "[2/4] Dropping all tables from staging database..."
-# Drop all tables in a single session with foreign key checks disabled
-mysql -h "$STAGE_HOST" -P "$DB_PORT" -u "$STAGE_USER" -p"$STAGE_PASS" "$STAGE_DB" 2> /dev/null <<EOF
-SET FOREIGN_KEY_CHECKS = 0;
-SET @tables = NULL;
-SELECT GROUP_CONCAT(CONCAT('`', table_name, '`')) INTO @tables
-  FROM information_schema.tables
-  WHERE table_schema = '$STAGE_DB';
-SET @stmt = IFNULL(CONCAT('DROP TABLE IF EXISTS ', @tables), 'SELECT 1');
-PREPARE stmt FROM @stmt;
-EXECUTE stmt;
-DEALLOCATE PREPARE stmt;
-SET FOREIGN_KEY_CHECKS = 1;
-EOF
-
-echo "✅ All staging tables dropped."
-echo "⏳ Sleeping for 30 seconds..."
-sleep 30
-echo "------------------------------------------------------------"
-
-echo "[3/4] Importing full production dump into staging..."
-gunzip -c "$DUMP_FILE" | sed '/SET @@GLOBAL.GTID_PURGED/d' | \
-  mysql -h "$STAGE_HOST" -P "$DB_PORT" -u "$STAGE_USER" -p"$STAGE_PASS" "$STAGE_DB" 2> /dev/null
-
-if [[ $? -eq 0 ]]; then
-  echo "✅ Full production dump successfully imported into staging."
-else
-  echo "❌ Import failed."
+if [ ! -d "$sql_dir" ]; then
+  echo "Expected 'database' directory not found in $latest_dir. Aborting!"
   exit 1
 fi
 
+# Populate the array with all .sql files
+sql_files=("$sql_dir"/*.sql)
+
+# Import all SQL files (schema + data)
+for sql_file in "${sql_files[@]}"; do
+  echo "Importing $(basename "$sql_file")"
+  sed -E '/SET @@GLOBAL.GTID_PURGED/d; s/DEFINER=`[^`]+`@`[^`]+`//g' "$sql_file" | \
+    mysql -h "$STAGE_HOST" -P "$DB_PORT" -u "$STAGE_USER" -p"$STAGE_PASS" "$STAGE_DB"
+done
+
+echo "✅ All SQL files imported into staging."
 echo "------------------------------------------------------------"
-echo "[4/4] Full migration from Production to Staging completed successfully!"
+echo "✅ Full migration from S3 archive to Staging completed successfully!"
